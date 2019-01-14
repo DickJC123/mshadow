@@ -168,6 +168,9 @@ class MSHADOW_ALIGNED(2) half_t {
   static int const fp16FractionBits = 10;
   static int const fp32FractionBits = 23;
   static int32_t const fp32FractionMask = ~(~0 << fp32FractionBits);  // == 0x7fffff
+  static int32_t const fp32HiddenBit = 1 << fp32FractionBits;         // == 0x800000
+  static int32_t const stickyBit = 1 << (fp16FractionBits + 1);       // == 0x000800
+  static int32_t const stickyMask = stickyBit - 1;                    // == 0x0007ff
   static int const shift = fp32FractionBits - fp16FractionBits;	      // == 13
   static int const shiftSign = 16;
   static int32_t const expAdjust = 127 - 15;	// exp32-127 = exp16-15, so exp16 = exp32 - (127-15)
@@ -193,11 +196,22 @@ class MSHADOW_ALIGNED(2) half_t {
   static int32_t const maxD = infC - maxC - 1;
   static int32_t const minD = minC - subC - 1;
 
+  // Amount to add to flt32 mantissa prior to truncating to round to nearest flt16
+  static MSHADOW_XINLINE uint32_t round_to_nearest_adjustment(uint32_t x) {
+#if MSHADOW_HALF_ROUND_TO_NEAREST == 1
+    // If LSB of fp16 mantissa is currently a '1', then we'll be rounding up to an even.
+    uint32_t rounding_up_to_even = (x >> shift) & 1;
+    return 0xfff + rounding_up_to_even;
+#else
+    return 0;
+#endif
+  }
+
   MSHADOW_XINLINE uint16_t float2half(const float& value) const {
     Bits v;
     v.f = value;
     uint32_t sign = v.si & signN;    // grab sign bit
-    v.si ^= sign;	             // clear sign bit from v
+    v.si ^= sign;                    // clear sign bit from v
     sign >>= shiftSign;              // logical shift sign to fp16 position
 
     if (v.si <= maxZ) {
@@ -205,27 +219,24 @@ class MSHADOW_ALIGNED(2) half_t {
       v.ui = 0;
     } else if (v.si < minN) {
       // Handle denorms
-      uint32_t significand = (1 << fp32FractionBits) | (v.ui & fp32FractionMask);
       uint32_t exp32 = v.ui >> fp32FractionBits;
       int32_t exp16 = exp32 - expAdjust;
       // If exp16 == 0 (just into the denorm range), then significant should be shifted right 1.
       // Smaller (so negative) exp16 values should result in greater right shifts.
       uint32_t vshift = 1 - exp16;
+      uint32_t significand = fp32HiddenBit | (v.ui & fp32FractionMask);
+      // Some low-order fraction bits that might soon be right-shifted into oblivion can never
+      // become flt16 fraction bits directly, but they might effect rounding.  Retain whether
+      // these bits are non-zero in a 'sticky bit.'
+      if (MSHADOW_HALF_ROUND_TO_NEAREST && (v.ui & stickyMask))
+        significand |= stickyBit;
       v.ui = significand >> vshift;
-#if MSHADOW_HALF_ROUND_TO_NEAREST == 1
-      // If LSB of fp16 mantissa is a '1', then we'll be rounding up to an even.
-      bool rounding_up_to_even = v.ui & (1 << shift);
-      bool has_nonzero_fraction = ~(~0 << vshift) & significand;
       // Rounding may increase exponent to 1, but that's OK.
-      v.ui += (rounding_up_to_even || has_nonzero_fraction) ? 0x1000 : 0xfff;
-#endif
+      v.ui += round_to_nearest_adjustment(v.ui);
     } else if (v.si <= maxN) {
       // Handle norms
-#if MSHADOW_HALF_ROUND_TO_NEAREST == 1
-      bool rounding_up_to_even = v.ui & (1 << shift);
       // Rounding may increase exponent, possibly creating an inf, but that's OK.
-      v.ui += rounding_up_to_even ? 0x1000 : 0xfff;
-#endif
+      v.ui += round_to_nearest_adjustment(v.ui);
       v.ui -= expAdjust << fp32FractionBits;
     } else if (v.si <= infN) {
       v.si = infN;
@@ -242,7 +253,7 @@ class MSHADOW_ALIGNED(2) half_t {
     Bits v;
     v.f = value;
     uint32_t sign = v.si & signN;    // grab sign bit
-    v.si ^= sign;	             // clear sign bit from v
+    v.si ^= sign;                    // clear sign bit from v
     sign >>= shiftSign;              // logical shift sign to fp16 position
 
     if (v.si <= maxZ) {
@@ -250,27 +261,24 @@ class MSHADOW_ALIGNED(2) half_t {
       v.ui = 0;
     } else if (v.si < minN) {
       // Handle denorms
-      uint32_t significand = (1 << fp32FractionBits) | (v.ui & fp32FractionMask);
       uint32_t exp32 = v.ui >> fp32FractionBits;
       int32_t exp16 = exp32 - expAdjust;
       // If exp16 == 0 (just into the denorm range), then significant should be shifted right 1.
       // Smaller (so negative) exp16 values should result in greater right shifts.
       uint32_t vshift = 1 - exp16;
+      uint32_t significand = fp32HiddenBit | (v.ui & fp32FractionMask);
+      // Some low-order fraction bits that might soon be right-shifted into oblivion can never
+      // become flt16 fraction bits directly, but they might effect rounding.  Retain whether
+      // these bits are non-zero in a 'sticky bit.'
+      if (MSHADOW_HALF_ROUND_TO_NEAREST && (v.ui & stickyMask))
+        significand |= stickyBit;
       v.ui = significand >> vshift;
-#if MSHADOW_HALF_ROUND_TO_NEAREST == 1
-      // If LSB of fp16 mantissa is a '1', then we'll be rounding up to an even.
-      bool rounding_up_to_even = v.ui & (1 << shift);
-      bool has_nonzero_fraction = ~(~0 << vshift) & significand;
       // Rounding may increase exponent to 1, but that's OK.
-      v.ui += (rounding_up_to_even || has_nonzero_fraction) ? 0x1000 : 0xfff;
-#endif
+      v.ui += round_to_nearest_adjustment(v.ui);
     } else if (v.si <= maxN) {
       // Handle norms
-#if MSHADOW_HALF_ROUND_TO_NEAREST == 1
-      bool rounding_up_to_even = v.ui & (1 << shift);
       // Rounding may increase exponent, possibly creating an inf, but that's OK.
-      v.ui += rounding_up_to_even ? 0x1000 : 0xfff;
-#endif
+      v.ui += round_to_nearest_adjustment(v.ui);
       v.ui -= expAdjust << fp32FractionBits;
     } else if (v.si <= infN) {
       v.si = infN;
